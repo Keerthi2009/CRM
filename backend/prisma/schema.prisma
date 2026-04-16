@@ -1,0 +1,215 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum Role {
+  AGGREGATOR
+  ADMIN
+  MANAGER
+  SALES_REP
+}
+
+enum StageType {
+  NORMAL
+  WON
+  LOST
+}
+
+enum ContractStatus {
+  DRAFT
+  SENT
+  COMPLETED
+  DECLINED
+}
+
+enum PaymentStatus {
+  PENDING
+  PAID
+  FAILED
+  REFUNDED
+}
+
+model Organisation {
+  id        String   @id @default(cuid())
+  name      String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  users             User[]
+  pipelines         Pipeline[]
+  leads             Lead[]
+  taskTemplates     TaskTemplate[]
+  contractTemplates ContractTemplate[]
+}
+
+model User {
+  id           String   @id @default(cuid())
+  orgId        String
+  name         String
+  email        String   @unique
+  passwordHash String
+  role         Role     @default(SALES_REP)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  organisation  Organisation @relation(fields: [orgId], references: [id])
+  assignedLeads Lead[]       @relation("AssignedLeads")
+  assignedTasks Task[]       @relation("AssignedTasks")
+  documents     Document[]
+}
+
+model Pipeline {
+  id        String   @id @default(cuid())
+  orgId     String
+  name      String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  organisation Organisation    @relation(fields: [orgId], references: [id])
+  stages       PipelineStage[]
+  leads        Lead[]
+}
+
+model PipelineStage {
+  id         String    @id @default(cuid())
+  pipelineId String
+  name       String
+  type       StageType @default(NORMAL)
+  order      Int
+
+  pipeline Pipeline @relation(fields: [pipelineId], references: [id], onDelete: Cascade)
+  leads    Lead[]
+}
+
+model Lead {
+  id           String  @id @default(cuid())
+  orgId        String
+  pipelineId   String
+  stageId      String
+  assignedToId String?
+
+  name    String
+  email   String?
+  phone   String?
+  company String?
+  address String?
+  lat     Float?
+  lng     Float?
+  value   Float   @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  organisation Organisation  @relation(fields: [orgId], references: [id])
+  pipeline     Pipeline      @relation(fields: [pipelineId], references: [id])
+  stage        PipelineStage @relation(fields: [stageId], references: [id])
+  assignedTo   User?         @relation("AssignedLeads", fields: [assignedToId], references: [id])
+
+  tasks     Task[]
+  documents Document[]
+  contracts Contract[]
+  payments  Payment[]
+}
+
+model TaskTemplate {
+  id        String   @id @default(cuid())
+  orgId     String
+  name      String
+  steps     Json
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  organisation Organisation @relation(fields: [orgId], references: [id])
+  tasks        Task[]
+}
+
+model Task {
+  id           String    @id @default(cuid())
+  leadId       String
+  templateId   String?
+  assignedToId String?
+
+  title       String
+  description String?
+  dueDate     DateTime?
+  completedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  lead       Lead          @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  template   TaskTemplate? @relation(fields: [templateId], references: [id])
+  assignedTo User?         @relation("AssignedTasks", fields: [assignedToId], references: [id])
+}
+
+model Document {
+  id           String  @id @default(cuid())
+  leadId       String
+  uploadedById String?
+
+  name     String
+  url      String
+  mimeType String?
+  size     Int?
+
+  createdAt DateTime @default(now())
+
+  lead       Lead  @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  uploadedBy User? @relation(fields: [uploadedById], references: [id])
+}
+
+model ContractTemplate {
+  id          String   @id @default(cuid())
+  orgId       String
+  name        String
+  content     String   // HTML from Jodit editor
+  signerCount Int      @default(1)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  organisation Organisation @relation(fields: [orgId], references: [id])
+  contracts    Contract[]
+}
+
+model Contract {
+  id String @id @default(cuid())
+  leadId     String
+  templateId String?
+
+  title                String
+  content              String?  // rendered HTML with placeholders resolved
+  signers              Json?    // [{role,name,email,signed,signedAt}]
+  docusealSubmissionId String?
+  status               ContractStatus @default(DRAFT)
+
+  sentAt      DateTime?
+  completedAt DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  lead     Lead             @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  template ContractTemplate? @relation(fields: [templateId], references: [id])
+  payments Payment[]
+}
+
+model Payment {
+  id         String  @id @default(cuid())
+  leadId     String
+  contractId String?
+
+  amount   Float
+  currency String        @default("USD")
+  status   PaymentStatus @default(PENDING)
+  notes    String?
+
+  paidAt    DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  lead     Lead      @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  contract Contract? @relation(fields: [contractId], references: [id])
+}

@@ -1,0 +1,17 @@
+# Secrets
+.env
+
+# Dependencies
+node_modules/
+
+# Build
+dist/
+
+# Prisma generated client
+node_modules/.prisma/
+
+# Uploaded files
+uploads/
+
+# Logs
+*.log
