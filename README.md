@@ -485,7 +485,288 @@ npm run preview      # Preview production build
 
 ---
 
-## Production Deployment
+## Docker Deployment (Local)
+
+### Prerequisites
+
+- [Docker Desktop](https://www.docker.com/products/docker-desktop/) installed and running
+
+### Files added
+
+```
+CRM/
+├── docker-compose.yml         # Orchestrates postgres, backend, frontend
+├── .env.docker.example        # Template for Docker env vars
+├── backend/
+│   ├── Dockerfile             # Multi-stage Node.js build
+│   └── .dockerignore
+└── frontend/
+    ├── Dockerfile             # Multi-stage React + Nginx build
+    ├── nginx.conf             # Proxies /api and /uploads to backend
+    └── .dockerignore
+```
+
+### Run with Docker Compose
+
+```bash
+# 1. Copy and fill in secrets
+cp .env.docker.example .env.docker
+
+# 2. Build and start all services
+docker compose --env-file .env.docker up --build -d
+
+# 3. Seed demo data (first run only)
+docker compose exec backend npm run db:seed
+```
+
+The app is now available at **http://localhost**
+
+To stop:
+
+```bash
+docker compose down
+```
+
+To wipe the database volume too:
+
+```bash
+docker compose down -v
+```
+
+### Services
+
+| Service | Container port | Exposed at |
+|---|---|---|
+| Frontend (Nginx) | 80 | http://localhost |
+| Backend (Express) | 3001 | Internal only |
+| PostgreSQL | 5432 | Internal only |
+
+> **Note:** Migrations run automatically on backend startup via `npx prisma migrate deploy`.
+
+---
+
+## AWS Deployment (Docker + ECS Fargate + RDS)
+
+This guide uses **Amazon ECR** (container registry), **ECS Fargate** (serverless containers), **RDS** (managed PostgreSQL), and an **Application Load Balancer**.
+
+### Architecture
+
+```
+Internet → ALB (port 80/443)
+               ├── /* → ECS Frontend Task (Nginx)
+               └── /api/* → ECS Backend Task (Express)
+                                  └── RDS PostgreSQL
+```
+
+### Prerequisites
+
+- [AWS CLI](https://docs.aws.amazon.com/cli/latest/userguide/install-cliv2.html) configured (`aws configure`)
+- Docker Desktop running
+
+---
+
+### Step 1 — Create ECR repositories
+
+```bash
+AWS_REGION=us-east-1
+AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+
+aws ecr create-repository --repository-name crm-backend  --region $AWS_REGION
+aws ecr create-repository --repository-name crm-frontend --region $AWS_REGION
+```
+
+### Step 2 — Build and push images
+
+```bash
+# Authenticate Docker to ECR
+aws ecr get-login-password --region $AWS_REGION \
+  | docker login --username AWS \
+    --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com
+
+# Backend
+docker build -t crm-backend ./backend
+docker tag  crm-backend:latest $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/crm-backend:latest
+docker push $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/crm-backend:latest
+
+# Frontend (nginx proxies /api to the backend ALB URL — see Step 5)
+docker build -t crm-frontend ./frontend
+docker tag  crm-frontend:latest $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/crm-frontend:latest
+docker push $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/crm-frontend:latest
+```
+
+### Step 3 — Create RDS PostgreSQL
+
+1. Open **AWS Console → RDS → Create database**
+2. Engine: **PostgreSQL 16**, template: **Free tier** (dev) or **Production**
+3. DB instance identifier: `crm-db`
+4. Set a master username / password
+5. Enable **Public access: No** (keep it inside the VPC)
+6. Note the **endpoint** (e.g. `crm-db.xxxxxx.us-east-1.rds.amazonaws.com`)
+7. After creation, connect and create the database:
+
+```bash
+psql -h <RDS_ENDPOINT> -U postgres -c "CREATE DATABASE crm_db;"
+```
+
+### Step 4 — Store secrets in AWS Parameter Store
+
+```bash
+aws ssm put-parameter --name /crm/DATABASE_URL \
+  --value "postgresql://postgres:<PASSWORD>@<RDS_ENDPOINT>:5432/crm_db" \
+  --type SecureString
+
+aws ssm put-parameter --name /crm/JWT_SECRET \
+  --value "<your-long-random-secret>" \
+  --type SecureString
+```
+
+### Step 5 — Create ECS Cluster
+
+```bash
+aws ecs create-cluster --cluster-name crm-cluster --region $AWS_REGION
+```
+
+### Step 6 — Create ECS Task Definitions
+
+**Backend task** (`backend-task.json`):
+
+```json
+{
+  "family": "crm-backend",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "512",
+  "memory": "1024",
+  "executionRoleArn": "arn:aws:iam::<ACCOUNT_ID>:role/ecsTaskExecutionRole",
+  "containerDefinitions": [
+    {
+      "name": "backend",
+      "image": "<ACCOUNT_ID>.dkr.ecr.us-east-1.amazonaws.com/crm-backend:latest",
+      "portMappings": [{ "containerPort": 3001 }],
+      "environment": [
+        { "name": "PORT", "value": "3001" },
+        { "name": "JWT_EXPIRES_IN", "value": "7d" },
+        { "name": "FRONTEND_URL", "value": "https://<your-domain>" }
+      ],
+      "secrets": [
+        { "name": "DATABASE_URL", "valueFrom": "/crm/DATABASE_URL" },
+        { "name": "JWT_SECRET",   "valueFrom": "/crm/JWT_SECRET" }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/crm-backend",
+          "awslogs-region": "us-east-1",
+          "awslogs-stream-prefix": "ecs"
+        }
+      }
+    }
+  ]
+}
+```
+
+```bash
+aws ecs register-task-definition --cli-input-json file://backend-task.json
+```
+
+**Frontend task** — same structure but:
+- image: `crm-frontend:latest`
+- containerPort: `80`
+- no secrets needed
+
+> **Important:** Before building the final frontend image for AWS, update `frontend/nginx.conf` — replace `proxy_pass http://backend:3001` with `proxy_pass http://<BACKEND_ALB_DNS>` so the nginx container can reach the backend service.
+
+### Step 7 — Create Application Load Balancer
+
+1. **AWS Console → EC2 → Load Balancers → Create ALB**
+2. Create two **Target Groups**:
+   - `crm-frontend-tg` → port 80, health check `/`
+   - `crm-backend-tg`  → port 3001, health check `/api/auth/me` (expects 401, not 5xx)
+3. **Listener rules** (port 80):
+   - `Path /api/*` → forward to `crm-backend-tg`
+   - `Path /uploads/*` → forward to `crm-backend-tg`
+   - `Default` → forward to `crm-frontend-tg`
+4. For HTTPS (recommended): add port 443 listener with an ACM certificate
+
+### Step 8 — Create ECS Services
+
+```bash
+# Backend service
+aws ecs create-service \
+  --cluster crm-cluster \
+  --service-name crm-backend \
+  --task-definition crm-backend \
+  --desired-count 1 \
+  --launch-type FARGATE \
+  --network-configuration "awsvpcConfiguration={subnets=[<SUBNET_IDS>],securityGroups=[<SG_ID>],assignPublicIp=ENABLED}" \
+  --load-balancers "targetGroupArn=<BACKEND_TG_ARN>,containerName=backend,containerPort=3001"
+
+# Frontend service (same pattern, containerPort=80)
+aws ecs create-service \
+  --cluster crm-cluster \
+  --service-name crm-frontend \
+  --task-definition crm-frontend \
+  --desired-count 1 \
+  --launch-type FARGATE \
+  --network-configuration "awsvpcConfiguration={subnets=[<SUBNET_IDS>],securityGroups=[<SG_ID>],assignPublicIp=ENABLED}" \
+  --load-balancers "targetGroupArn=<FRONTEND_TG_ARN>,containerName=frontend,containerPort=80"
+```
+
+### Step 9 — Seed the database
+
+Run the seed once using ECS Exec (or a temporary Fargate task):
+
+```bash
+aws ecs execute-command \
+  --cluster crm-cluster \
+  --task <BACKEND_TASK_ARN> \
+  --container backend \
+  --interactive \
+  --command "npm run db:seed"
+```
+
+### Step 10 — Access the app
+
+Open the ALB DNS name in your browser (e.g. `http://crm-alb-xxxx.us-east-1.elb.amazonaws.com`).
+
+Login with the seeded credentials:
+
+| Email | Password | Role |
+|---|---|---|
+| `admin@demo.com` | `Admin@1234` | ADMIN |
+| `aggregator@platform.com` | `Aggregator@1234` | AGGREGATOR |
+
+---
+
+### Deploying updates
+
+```bash
+# Rebuild and push the updated image
+docker build -t crm-backend ./backend
+docker tag  crm-backend:latest $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/crm-backend:latest
+docker push $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/crm-backend:latest
+
+# Force ECS to pull the new image
+aws ecs update-service --cluster crm-cluster --service crm-backend --force-new-deployment
+```
+
+---
+
+### AWS Cost estimate (us-east-1, minimal setup)
+
+| Resource | Spec | ~Monthly cost |
+|---|---|---|
+| ECS Fargate (2 tasks) | 0.5 vCPU / 1 GB each | ~$15 |
+| RDS PostgreSQL | db.t3.micro, 20 GB | ~$15 |
+| ALB | 1 LCU average | ~$18 |
+| ECR storage | < 1 GB | ~$0.10 |
+| **Total** | | **~$48/month** |
+
+> Use **Free Tier** resources (RDS t3.micro, single Fargate task) to reduce costs during development.
+
+---
+
+## Production Deployment (manual / non-Docker)
 
 ### Backend
 1. Set all required env vars on the server
@@ -494,9 +775,8 @@ npm run preview      # Preview production build
 4. Start with `npm start` or `pm2 start dist/index.js`
 
 ### Frontend
-1. Set `VITE_API_URL` if the API is on a different domain
-2. Run `npm run build` → outputs to `dist/`
-3. Serve `dist/` with Nginx, Vercel, Netlify, or any static host
+1. Run `npm run build` → outputs to `dist/`
+2. Serve `dist/` with Nginx, Vercel, Netlify, or any static host
 
 ---
 

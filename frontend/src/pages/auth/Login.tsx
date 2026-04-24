@@ -73,7 +73,7 @@ export default function Login() {
                 ),
               }}
             />
-            <Button fullWidth variant="contained" type="submit" loading={loading} size="large">
+            <Button fullWidth variant="contained" type="submit" disabled={loading} size="large">
               Sign In
             </Button>
           </Box>

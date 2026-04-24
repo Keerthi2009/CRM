@@ -129,7 +129,7 @@ router.post('/:token', async (req: Request, res: Response) => {
       return res.status(404).json({ error: 'Signing link not found or expired' });
     }
 
-    const signers = foundContract.signers as SignerRecord[];
+    const signers = foundContract.signers as unknown as SignerRecord[];
 
     if (signers[signerIndex].signed) {
       return res.status(400).json({ error: 'Document already signed' });
@@ -154,7 +154,7 @@ router.post('/:token', async (req: Request, res: Response) => {
     await prisma.contract.update({
       where: { id: foundContract.id },
       data: {
-        signers,
+        signers: signers as unknown as import('@prisma/client').Prisma.InputJsonValue,
         content: updatedContent || undefined,
         status: allSigned ? 'COMPLETED' : 'SENT',
         completedAt: allSigned ? new Date() : undefined,

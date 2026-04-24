@@ -17,6 +17,8 @@ out/
 .env*
 !.env.example
 backend/.env
+.env.docker
+
 
 
 

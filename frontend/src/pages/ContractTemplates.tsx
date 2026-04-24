@@ -65,7 +65,8 @@ function TemplateEditorDialog({
   onSaved: (t: ContractTemplate) => void;
 }) {
   const { enqueueSnackbar } = useSnackbar();
-  const editorRef = useRef<{ value: string } | null>(null);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const editorRef = useRef<any>(null);
 
   const [name, setName]             = useState('');
   const [signerCount, setSignerCount] = useState(1);
