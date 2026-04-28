@@ -21,6 +21,7 @@ jobs:
             set -e
             cd /home/ubuntu/crm
             git pull origin main
-            docker compose -f docker-compose.prod.yml up -d --build --remove-orphans
+            COMPOSE_PARALLEL_LIMIT=1 docker compose -f docker-compose.prod.yml build
+            docker compose -f docker-compose.prod.yml up -d --remove-orphans
             docker image prune -f
             echo "Deployed successfully"
